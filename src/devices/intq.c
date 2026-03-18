@@ -102,13 +102,23 @@ wait (struct intq *q UNUSED, struct thread **waiter)
 static void
 signal (struct intq *q UNUSED, struct thread **waiter) 
 {
+  struct thread *unblocked;
+
   ASSERT (intr_get_level () == INTR_OFF);
   ASSERT ((waiter == &q->not_empty && !intq_empty (q))
           || (waiter == &q->not_full && !intq_full (q)));
 
   if (*waiter != NULL) 
     {
-      thread_unblock (*waiter);
+      unblocked = *waiter;
+      thread_unblock (unblocked);
       *waiter = NULL;
+      if (unblocked->priority > thread_current ()->priority)
+        {
+          if (intr_context ())
+            intr_yield_on_return ();
+          else
+            thread_yield ();
+        }
     }
 }

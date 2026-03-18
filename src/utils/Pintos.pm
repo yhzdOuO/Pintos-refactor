@@ -47,7 +47,7 @@ sub set_part {
     my ($role, $source) = $opt =~ /^([a-z]+)(?:-([a-z]+))?/ or die;
 
     $role = uc $role;
-    $source = 'FILE' if $source eq '';
+    $source = 'file' if !defined $source;
 
     die "can't have two sources for \L$role\E partition"
       if exists $parts{$role};
@@ -359,7 +359,7 @@ sub cyl_sectors {
 # Makes sure that the loader is a reasonable size.
 sub read_loader {
     my ($name) = @_;
-    $name = find_file ("/home/PINTOS-Ubuntu/src/threads/build/loader.bin") if !defined $name;
+    $name = find_file ("loader.bin") if !defined $name;
     die "Cannot find loader\n" if !defined $name;
 
     my ($handle);
@@ -462,7 +462,14 @@ sub interpret_partition_table {
 # found, returns the name; otherwise, returns undef.
 sub find_file {
     my ($base_name) = @_;
-    -e && return $_ foreach $base_name, "build/$base_name";
+    my ($src_root, $project) =
+      `pwd` =~ m{^(.*?/src)/(threads|userprog|vm|filesys)(?:/.*)?$};
+    my (@paths) = ($base_name, "build/$base_name");
+    push (@paths, "$src_root/$project/build/$base_name")
+      if defined $src_root && defined $project;
+    push (@paths, "$src_root/threads/build/$base_name")
+      if defined $src_root;
+    -e && return $_ foreach @paths;
     return undef;
 }
 

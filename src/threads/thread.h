@@ -18,6 +18,11 @@ enum thread_status
    You can redefine this to whatever type you like. */
 typedef int tid_t;
 #define TID_ERROR ((tid_t) -1)          /* Error value for tid_t. */
+struct lock;
+struct file;
+#ifdef USERPROG
+struct child_status;
+#endif
 
 /* Thread priorities. */
 #define PRI_MIN 0                       /* Lowest priority. */
@@ -88,14 +93,27 @@ struct thread
     char name[16];                      /* Name (for debugging purposes). */
     uint8_t *stack;                     /* Saved stack pointer. */
     int priority;                       /* Priority. */
+    int base_priority;                  /* Priority before donation. */
+    int nice;                           /* Niceness. */
+    int recent_cpu;                     /* Recent CPU usage (fixed-point). */
     struct list_elem allelem;           /* List element for all threads list. */
 
     /* Shared between thread.c and synch.c. */
     struct list_elem elem;              /* List element. */
+    struct list donations;              /* Threads donating to this thread. */
+    struct list_elem donation_elem;     /* List element for donation list. */
+    struct lock *waiting_lock;          /* Lock this thread is waiting on. */
+    int64_t wakeup_tick;                /* Tick to wake up at (timer.c). */
 
 #ifdef USERPROG
     /* Owned by userprog/process.c. */
     uint32_t *pagedir;                  /* Page directory. */
+    struct list children;               /* Child process statuses. */
+    struct child_status *self_status;   /* This process's shared status. */
+    int exit_code;                      /* Exit status for wait(). */
+    struct list fd_table;               /* Open file descriptors. */
+    int next_fd;                        /* Next descriptor number. */
+    struct file *exec_file;             /* Executable file being run. */
 #endif
 
     /* Owned by thread.c. */
@@ -132,6 +150,9 @@ void thread_foreach (thread_action_func *, void *);
 
 int thread_get_priority (void);
 void thread_set_priority (int);
+void thread_add_donation (struct thread *donor, struct thread *donee);
+void thread_remove_lock_donations (struct thread *t, struct lock *lock);
+void thread_refresh_priority (struct thread *t);
 
 int thread_get_nice (void);
 void thread_set_nice (int);

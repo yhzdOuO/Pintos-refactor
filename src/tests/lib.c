@@ -5,7 +5,9 @@
 #include <string.h>
 #include <syscall.h>
 
-const char *test_name;
+/* GCC 10+ defaults to -fno-common, so give this a weak default
+   definition that test binaries can override safely. */
+const char *test_name __attribute__ ((weak)) = "(unnamed test)";
 bool quiet = false;
 
 static void
