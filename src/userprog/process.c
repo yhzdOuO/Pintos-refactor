@@ -22,7 +22,7 @@
 
 static thread_func start_process NO_RETURN;
 static bool load (char *cmdline, void (**eip) (void), void **esp);
-static struct child_status *child_status_create (void);
+static void child_status_init (struct child_status *status);
 static void child_status_release (struct child_status *status);
 static struct child_status *find_child_status (tid_t child_tid);
 
@@ -46,92 +46,80 @@ process_execute (const char *file_name)
   char *save_ptr;
   struct child_status *child_status;
   struct process_start_args *start_args;
-  bool load_success;
   tid_t tid;
 
-  /* Make a copy of FILE_NAME.
-     Otherwise there's a race between the caller and load(). */
+  ASSERT (file_name != NULL);
+
+  int len = strnlen (file_name, PGSIZE);
+  if (len >= PGSIZE)
+    return TID_ERROR;
+  
   fn_copy = palloc_get_page (0);
+  if (fn_copy == NULL)
+    goto free4;
+
   name_copy = palloc_get_page (0);
-  if (fn_copy == NULL || name_copy == NULL)
-    {
-      if (fn_copy != NULL)
-        palloc_free_page (fn_copy);
-      if (name_copy != NULL)
-        palloc_free_page (name_copy);
-      return TID_ERROR;
-    }
-  if (strlcpy (name_copy, file_name, PGSIZE) >= PGSIZE)
-    {
-      palloc_free_page (fn_copy);
-      palloc_free_page (name_copy);
-      return TID_ERROR;
-    }
-  prog_name = strtok_r (name_copy, " ", &save_ptr);
-  if (prog_name == NULL)
-    {
-      palloc_free_page (fn_copy);
-      palloc_free_page (name_copy);
-      return TID_ERROR;
-    }
+  if (name_copy == NULL)
+    goto free3;
 
-  if (strlcpy (fn_copy, file_name, PGSIZE) >= PGSIZE)
-    {
-      palloc_free_page (fn_copy);
-      palloc_free_page (name_copy);
-      return TID_ERROR;
-    }
-
-  child_status = child_status_create ();
+  child_status = malloc (sizeof *child_status);
   if (child_status == NULL)
-    {
-      palloc_free_page (fn_copy);
-      palloc_free_page (name_copy);
-      return TID_ERROR;
-    }
-  list_push_back (&cur->children, &child_status->elem);
+    goto free2;
 
   start_args = malloc (sizeof *start_args);
   if (start_args == NULL)
-    {
-      list_remove (&child_status->elem);
-      child_status_release (child_status);
-      child_status_release (child_status);
-      palloc_free_page (fn_copy);
-      palloc_free_page (name_copy);
-      return TID_ERROR;
-    }
+    goto free1;
+  
+  /* Make a copy of FILE_NAME.
+  Otherwise there's a race between the caller and load(). */
+  memcpy (fn_copy, file_name, len + 1);
+  memcpy (name_copy, file_name, len + 1);
+  prog_name = strtok_r (name_copy, " ", &save_ptr);
+  if (prog_name == NULL)
+    goto free1;
+
+  child_status_init (child_status);
+  list_push_back (&cur->children, &child_status->elem);
+  
   start_args->cmdline = fn_copy;
   start_args->child_status = child_status;
-
-  /* Create a new thread to execute FILE_NAME. */
+  
   tid = thread_create (prog_name, PRI_DEFAULT, start_process, start_args);
   palloc_free_page (name_copy);
-  if (tid == TID_ERROR)
-    {
-      free (start_args);
-      list_remove (&child_status->elem);
-      child_status_release (child_status);
-      child_status_release (child_status);
-      palloc_free_page (fn_copy);
-      return TID_ERROR;
-    }
 
-  lock_acquire (&child_status->lock);
+  if (tid == TID_ERROR) {
+    /* Failed to create thread. */
+    /* help child to clean up */
+    free (start_args);
+    palloc_free_page (fn_copy);
+    /* clean up child status */
+    list_remove (&child_status->elem);
+    free (child_status);
+    return TID_ERROR;
+  }
+
   child_status->tid = tid;
-  lock_release (&child_status->lock);
 
   sema_down (&child_status->load_sema);
-  lock_acquire (&child_status->lock);
-  load_success = child_status->load_success;
-  lock_release (&child_status->lock);
-  if (!load_success)
+  if (!child_status->load_success)
     {
+      /* Failed to load executable. */
       list_remove (&child_status->elem);
       child_status_release (child_status);
       return TID_ERROR;
-    }
+    } 
   return tid;
+
+free1:
+  free (start_args);
+free2:
+  free (child_status);
+free3:  
+  palloc_free_page (name_copy);
+free4:
+  palloc_free_page (fn_copy);
+
+  return TID_ERROR;
 }
 
 /* A thread function that loads a user process and starts it
@@ -155,10 +143,7 @@ start_process (void *start_args_)
   if_.eflags = FLAG_IF | FLAG_MBS;
   success = load (cmdline, &if_.eip, &if_.esp);
 
-  lock_acquire (&child_status->lock);
-  child_status->load_done = true;
   child_status->load_success = success;
-  lock_release (&child_status->lock);
   sema_up (&child_status->load_sema);
 
   /* If load failed, quit. */
@@ -190,27 +175,14 @@ process_wait (tid_t child_tid)
 {
   struct child_status *child_status = find_child_status (child_tid);
   int exit_code;
-  bool exited;
 
-  if (child_status == NULL)
+  if (child_status == NULL || child_status->waited)
     return -1;
 
-  lock_acquire (&child_status->lock);
-  if (child_status->waited)
-    {
-      lock_release (&child_status->lock);
-      return -1;
-    }
   child_status->waited = true;
-  exited = child_status->exited;
-  lock_release (&child_status->lock);
-
-  if (!exited)
-    sema_down (&child_status->wait_sema);
-
-  lock_acquire (&child_status->lock);
+  
+  sema_down (&child_status->wait_sema);
   exit_code = child_status->exit_code;
-  lock_release (&child_status->lock);
 
   list_remove (&child_status->elem);
   child_status_release (child_status);
@@ -241,10 +213,7 @@ process_exit (void)
   if (cur->self_status != NULL)
     {
       struct child_status *self_status = cur->self_status;
-      lock_acquire (&self_status->lock);
       self_status->exit_code = cur->exit_code;
-      self_status->exited = true;
-      lock_release (&self_status->lock);
       sema_up (&self_status->wait_sema);
       child_status_release (self_status);
       cur->self_status = NULL;
@@ -274,24 +243,20 @@ process_exit (void)
     }
 }
 
-static struct child_status *
-child_status_create (void)
+void
+child_status_init (struct child_status *status)
 {
-  struct child_status *status = malloc (sizeof *status);
+  ASSERT (status != NULL);
 
-  if (status == NULL)
-    return NULL;
   status->tid = TID_ERROR;
   status->exit_code = -1;
-  status->exited = false;
   status->waited = false;
-  status->load_done = false;
   status->load_success = false;
   status->ref_cnt = 2;
   lock_init (&status->lock);
   sema_init (&status->load_sema, 0);
   sema_init (&status->wait_sema, 0);
-  return status;
+  //return status;
 }
 
 static void

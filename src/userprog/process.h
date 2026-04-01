@@ -9,9 +9,7 @@ struct child_status
   {
     tid_t tid;
     int exit_code;
-    bool exited;
     bool waited;
-    bool load_done;
     bool load_success;
     int ref_cnt;
     struct lock lock;

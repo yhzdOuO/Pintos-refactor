@@ -100,8 +100,7 @@ struct thread
 
     /* Shared between thread.c and synch.c. */
     struct list_elem elem;              /* List element. */
-    struct list donations;              /* Threads donating to this thread. */
-    struct list_elem donation_elem;     /* List element for donation list. */
+    struct list locks_held;             /* Locks currently held. */
     struct lock *waiting_lock;          /* Lock this thread is waiting on. */
     int64_t wakeup_tick;                /* Tick to wake up at (timer.c). */
 
@@ -150,9 +149,8 @@ void thread_foreach (thread_action_func *, void *);
 
 int thread_get_priority (void);
 void thread_set_priority (int);
-void thread_add_donation (struct thread *donor, struct thread *donee);
-void thread_remove_lock_donations (struct thread *t, struct lock *lock);
 void thread_refresh_priority (struct thread *t);
+void thread_refresh_priority_chain (struct thread *t);
 
 int thread_get_nice (void);
 void thread_set_nice (int);

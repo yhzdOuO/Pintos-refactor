@@ -75,8 +75,7 @@ static struct thread *next_thread_to_run (void);
 static bool thread_priority_more (const struct list_elem *,
                                   const struct list_elem *,
                                   void *aux UNUSED);
-static bool donation_exists (struct list *donations,
-                             const struct thread *donor);
+static int lock_max_waiter_priority (const struct lock *lock);
 static int int_to_fp (int);
 static int fp_to_int_zero (int);
 static int fp_to_int_nearest (int);
@@ -418,38 +417,6 @@ thread_get_priority (void)
   return thread_current ()->priority;
 }
 
-/* Adds DONOR to DONEE's donation list if not already present. */
-void
-thread_add_donation (struct thread *donor, struct thread *donee)
-{
-  ASSERT (donor != NULL);
-  ASSERT (donee != NULL);
-  ASSERT (intr_get_level () == INTR_OFF);
-
-  if (!donation_exists (&donee->donations, donor))
-    list_push_back (&donee->donations, &donor->donation_elem);
-}
-
-/* Removes all donations to T that are waiting on LOCK. */
-void
-thread_remove_lock_donations (struct thread *t, struct lock *lock)
-{
-  struct list_elem *e;
-
-  ASSERT (t != NULL);
-  ASSERT (lock != NULL);
-  ASSERT (intr_get_level () == INTR_OFF);
-
-  for (e = list_begin (&t->donations); e != list_end (&t->donations); )
-    {
-      struct thread *donor = list_entry (e, struct thread, donation_elem);
-      if (donor->waiting_lock == lock)
-        e = list_remove (e);
-      else
-        e = list_next (e);
-    }
-}
-
 /* Recomputes T's effective priority and updates ready_list position if needed. */
 void
 thread_refresh_priority (struct thread *t)
@@ -461,12 +428,14 @@ thread_refresh_priority (struct thread *t)
   ASSERT (intr_get_level () == INTR_OFF);
 
   new_priority = t->base_priority;
-  for (e = list_begin (&t->donations); e != list_end (&t->donations);
+  for (e = list_begin (&t->locks_held); e != list_end (&t->locks_held);
        e = list_next (e))
     {
-      struct thread *donor = list_entry (e, struct thread, donation_elem);
-      if (donor->priority > new_priority)
-        new_priority = donor->priority;
+      struct lock *lock = list_entry (e, struct lock, holder_elem);
+      int waiter_priority = lock_max_waiter_priority (lock);
+
+      if (waiter_priority > new_priority)
+        new_priority = waiter_priority;
     }
 
   if (t->priority != new_priority)
@@ -478,6 +447,38 @@ thread_refresh_priority (struct thread *t)
           list_insert_ordered (&ready_list, &t->elem, thread_priority_more,
                                NULL);
         }
+    }
+}
+
+/* Refreshes the effective priority of holders along T's wait chain. */
+void
+thread_refresh_priority_chain (struct thread *t)
+{
+  int depth = 0;
+  struct thread *cur = t;
+
+  ASSERT (intr_get_level () == INTR_OFF);
+
+  while (depth < 8 && cur != NULL && cur->waiting_lock != NULL)
+    {
+      struct thread *holder = cur->waiting_lock->holder;
+
+      if (holder == NULL)
+        break;
+
+      if (holder->priority < cur->priority)
+        {
+          holder->priority = cur->priority;
+          if (holder->status == THREAD_READY)
+            {
+              list_remove (&holder->elem);
+              list_insert_ordered (&ready_list, &holder->elem,
+                                   thread_priority_more, NULL);
+            }
+        }
+
+      cur = holder;
+      depth++;
     }
 }
 
@@ -622,7 +623,7 @@ init_thread (struct thread *t, const char *name, int priority)
   t->base_priority = priority;
   t->nice = 0;
   t->recent_cpu = 0;
-  list_init (&t->donations);
+  list_init (&t->locks_held);
   t->waiting_lock = NULL;
   t->wakeup_tick = 0;
 #ifdef USERPROG
@@ -680,18 +681,26 @@ thread_priority_more (const struct list_elem *a, const struct list_elem *b,
   return thread_a->priority > thread_b->priority;
 }
 
-/* Returns true if DONOR already appears in DONATIONS. */
-static bool
-donation_exists (struct list *donations, const struct thread *donor)
+/* Returns the highest effective priority among threads waiting on LOCK. */
+static int
+lock_max_waiter_priority (const struct lock *lock)
 {
   struct list_elem *e;
+  struct list *waiters = (struct list *) &lock->semaphore.waiters;
+  int max_priority = PRI_MIN - 1;
 
-  for (e = list_begin (donations);
-       e != list_end (donations);
+  ASSERT (lock != NULL);
+
+  for (e = list_begin (waiters);
+       e != list_end (waiters);
        e = list_next (e))
-    if (list_entry (e, struct thread, donation_elem) == donor)
-      return true;
-  return false;
+    {
+      struct thread *waiter = list_entry (e, struct thread, elem);
+      if (waiter->priority > max_priority)
+        max_priority = waiter->priority;
+    }
+
+  return max_priority;
 }
 
 /* Converts integer N to fixed-point. */
